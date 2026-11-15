@@ -6,15 +6,14 @@ file="$1"; out="${2:-/tmp/run}"
 sha=$(git rev-parse HEAD)
 curl -sS -m 300 -o "$out.raw" "${RUNNER_URL}?sha=${sha}&file=${file}"
 python3 - "$out" <<'PY'
-import json, sys, base64
+# The runner answers with a Wolfram string literal wrapping JSON; pull the fields out with regexes.
+import sys, re, base64
 out = sys.argv[1]
-raw = open(out + ".raw", encoding="utf-8").read()
-d = json.loads(raw)
-if isinstance(d, str): d = json.loads(d)
-print("success:", d.get("success"))
-print("messages:", d.get("messages"))
-print("result:", d.get("result", "")[:3000])
-if d.get("png"):
-    open(out + ".png", "wb").write(base64.b64decode(d["png"]))
+raw = open(out + ".raw", encoding="utf-8", errors="replace").read()
+m = re.search(r'\\"png\\":\\"(.*?)\\"', raw, re.S)
+head = raw[:m.start()] if m else raw
+print(head.replace("\\n", "\n").replace("\\t", "  ").replace('\\"', '"')[:4000])
+if m and m.group(1):
+    open(out + ".png", "wb").write(base64.b64decode(m.group(1).replace("\\", "")))
     print("png:", out + ".png")
 PY
