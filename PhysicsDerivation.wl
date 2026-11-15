@@ -83,9 +83,9 @@ smallOrder[term_] := Total[
 derivOrder[term_] := Max[0,
   Cases[term, Derivative[n__] :> Total[{n}], {0, Infinity}, Heads -> True]];
 
-(* 和式: 小量的低阶项在前，其次高阶导数在前 *)
+(* 和式: 小量的低阶项在前，其次高阶导数在前，单独的常量放最后 *)
 sortPlus[terms_List] := First /@ SortBy[
-  MapIndexed[{#1, {smallOrder[#1], -derivOrder[#1], First[#2]}} &, terms], Last];
+  MapIndexed[{#1, {smallOrder[#1], -derivOrder[#1], Boole[AtomQ[#1]], First[#2]}} &, terms], Last];
 
 (* 乘积: 数字、常量符号、小量、函数与导数 *)
 factorClass[x_] := Which[
@@ -107,20 +107,21 @@ tbox[e_] := ToBoxes[e, TraditionalForm];
 partialForm[f_, vars_List, ns_List] := Inactive[D][f @@ vars,
   Sequence @@ Replace[Select[Transpose[{vars, ns}], Last[#] > 0 &], {v_, 1} :> v, {1}]];
 
-(* 多元函数的偏导数写成 \[PartialD] 记号；自变量不是单个符号时，写成"在某点取值" *)
+(* 多元函数的偏导数写成 \[PartialD] 记号；自变量不是单个符号时，写成"在某点取值"。
+   reorder 之后式子包在 HoldForm 里，所以替换结果要用 With[..., r /; True] 先算好再放进去 *)
 pretty[e_, names_Association] := reorder[e] /. {
     Derivative[n__][f_][a__Symbol] /; Length[{n}] == Length[{a}] && Length[{a}] > 1 :>
-      partialForm[f, {a}, {n}],
+      With[{r = partialForm[f, {a}, {n}]}, r /; True],
     Derivative[n__][f_][a__] /; Length[{n}] == Length[{a}] && Length[{a}] > 1 &&
         KeyExistsQ[names, f] && Length[names[f]] == Length[{a}] :>
-      DisplayForm[SubscriptBox[
-        RowBox[{tbox[partialForm[f, names[f], {n}]], "\[VerticalSeparator]"}],
-        RowBox[Riffle[tbox /@ {a}, ","]]]]} /. {
+      With[{r = DisplayForm[SubscriptBox[
+          RowBox[{tbox[partialForm[f, names[f], {n}]], "\[VerticalSeparator]"}],
+          RowBox[Riffle[tbox /@ {a}, ","]]]]}, r /; True]} /. {
     (* 只含一元函数时，全导数写成 d/dt *)
     Inactive[D][F_, t_Symbol] /;
         FreeQ[F, Derivative[_, __]] && FreeQ[F, (h_ /; userQ[h])[_, __]] :>
-      DisplayForm[RowBox[{FractionBox["d", RowBox[{"d", tbox[t]}]],
-        RowBox[{"(", tbox[F], ")"}]}]]};
+      With[{r = DisplayForm[RowBox[{FractionBox["d", RowBox[{"d", tbox[t]}]],
+        RowBox[{"(", tbox[F], ")"}]}]]}, r /; True]};
 
 (* 从整本推导里找出每个多元函数的自变量名，如 u -> {x, t} *)
 argNames[exprs_List] := Association[Cases[exprs,
