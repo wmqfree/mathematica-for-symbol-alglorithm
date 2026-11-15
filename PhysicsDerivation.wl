@@ -72,23 +72,72 @@ mark[False] := Style["\[Times]", Red, Bold];
 mark["Approx"] := Style["\[TildeTilde]", Orange, Bold];
 mark[_] := Style["\[LongDash]", Gray];
 
-(* 多元函数的偏导数按纸面习惯显示成 \[PartialD] 记号 *)
-pretty[e_] := e /. Derivative[n__][f_][a__Symbol] /;
-    Length[{n}] == Length[{a}] && Length[{a}] > 1 :>
-  Inactive[D][f[a], Sequence @@ Replace[
-    Select[Transpose[{{a}, {n}}], Last[#] > 0 &], {v_, 1} :> v, {1}]];
+(* ----- 纸面书写习惯的显示整理(只影响显示，不改变式子本身) ----- *)
 
-showExpr[e_] := If[MissingQ[e], "", TraditionalForm[pretty[e]]];
+userQ[h_] := MatchQ[h, _Symbol] && Context[h] =!= "System`";
+smallQ[s_] := MatchQ[s, _Symbol] && StringStartsQ[SymbolName[s], "\[CapitalDelta]"];
+
+smallOrder[term_] := Total[
+  Quiet[Check[Exponent[term, #], 0]] & /@
+    Union[Cases[term, x_Symbol /; smallQ[x], {0, Infinity}]]];
+derivOrder[term_] := Max[0,
+  Cases[term, Derivative[n__] :> Total[{n}], {0, Infinity}, Heads -> True]];
+
+(* 和式: 小量的低阶项在前，其次高阶导数在前 *)
+sortPlus[terms_List] := First /@ SortBy[
+  MapIndexed[{#1, {smallOrder[#1], -derivOrder[#1], First[#2]}} &, terms], Last];
+
+(* 乘积: 数字、常量符号、小量、函数与导数 *)
+factorClass[x_] := Which[
+  NumericQ[x], 0,
+  smallQ[x] || MatchQ[x, Power[y_ /; smallQ[y], _]], 2,
+  MatchQ[x, _Symbol | Power[_Symbol, _]], 1,
+  True, 3];
+sortTimes[fs_List] := First /@ SortBy[
+  MapIndexed[{#1, {factorClass[#1], First[#2]}} &, fs], Last];
+
+reorder[e_] := Replace[e, {
+    p_Plus :> (HoldForm[Plus[##]] & @@ sortPlus[List @@ p]),
+    t_Times /; FreeQ[List @@ t, _?Negative, {1}] :>
+      (HoldForm[Times[##]] & @@ sortTimes[List @@ t])},
+  {0, Infinity}];
+
+tbox[e_] := ToBoxes[e, TraditionalForm];
+
+partialForm[f_, vars_List, ns_List] := Inactive[D][f @@ vars,
+  Sequence @@ Replace[Select[Transpose[{vars, ns}], Last[#] > 0 &], {v_, 1} :> v, {1}]];
+
+(* 多元函数的偏导数写成 \[PartialD] 记号；自变量不是单个符号时，写成"在某点取值" *)
+pretty[e_, names_Association] := reorder[e] /. {
+    Derivative[n__][f_][a__Symbol] /; Length[{n}] == Length[{a}] && Length[{a}] > 1 :>
+      partialForm[f, {a}, {n}],
+    Derivative[n__][f_][a__] /; Length[{n}] == Length[{a}] && Length[{a}] > 1 &&
+        KeyExistsQ[names, f] && Length[names[f]] == Length[{a}] :>
+      DisplayForm[SubscriptBox[
+        RowBox[{tbox[partialForm[f, names[f], {n}]], "\[VerticalSeparator]"}],
+        RowBox[Riffle[tbox /@ {a}, ","]]]]} /. {
+    (* 只含一元函数时，全导数写成 d/dt *)
+    Inactive[D][F_, t_Symbol] /;
+        FreeQ[F, Derivative[_, __]] && FreeQ[F, (h_ /; userQ[h])[_, __]] :>
+      DisplayForm[RowBox[{FractionBox["d", RowBox[{"d", tbox[t]}]],
+        RowBox[{"(", tbox[F], ")"}]}]]};
+
+(* 从整本推导里找出每个多元函数的自变量名，如 u -> {x, t} *)
+argNames[exprs_List] := Association[Cases[exprs,
+  (Derivative[__][f_] | f_)[a__Symbol] /; userQ[f] && Length[{a}] > 1 :> (f -> {a}),
+  {0, Infinity}]];
+
+showExpr[e_, names_] := If[MissingQ[e], "", TraditionalForm[pretty[e, names]]];
 
 showIndex[i_, st_] := If[KeyExistsQ[st, "Label"],
   Column[{i, Style[Row[{"[", st["Label"], "]"}], Gray, Small]}, Alignment -> Center], i];
 
 ShowDerivation[Derivation[steps_List]] :=
-  With[{
+  With[{names = argNames[Lookup[steps, "Expr"]]}, With[{
     grid = Grid[
       Prepend[
         MapIndexed[
-          {showIndex[First[#2], #1], showExpr[#1["Expr"]], #1["Reason"], mark[#1["Check"]]} &,
+          {showIndex[First[#2], #1], showExpr[#1["Expr"], names], #1["Reason"], mark[#1["Check"]]} &,
           steps],
         Style[#, Bold] & /@ {"步骤", "式子", "理由", "验证"}],
       Alignment -> {{Center, Left, Left, Center}},
@@ -98,7 +147,7 @@ ShowDerivation[Derivation[steps_List]] :=
     If[as === {}, grid,
       Column[{grid,
         Column[Prepend[Row[{"\[Bullet] ", #}] & /@ as,
-          Style["本推导的假设与近似", Bold]]]}, Spacings -> 1.5]]];
+          Style["本推导的假设与近似", Bold]]]}, Spacings -> 1.5]]]];
 
 Format[d : Derivation[_List]] := ShowDerivation[d];
 
