@@ -20,6 +20,14 @@ IntegrateBoth::usage = "IntegrateBoth[t, c] 两边对 t 积分，c 为积分常�
 SubstituteInto::usage = "SubstituteInto[rule, reason] 把 rule 代入当前式子(如试探解)。";
 SolveFor::usage = "SolveFor[var, assum, reason] 从当前方程解出 var，assum 用来舍去不合物理的根。";
 CheckDimensions::usage = "CheckDimensions[<|m -> DimM, x -> DimL, t -> DimT, ...|>] 检查当前方程各项量纲是否一致。";
+AssumeThat::usage = "AssumeThat[text] 记下一条建模假设，最后汇总在推导本末尾。";
+State::usage = "State[eq, reason, name] 列出一条新的关系(如守恒律、本构关系)，可选地起个名字。";
+NameIt::usage = "NameIt[name] 给当前式子起名字，供之后 UseRelation / Recall 引用。";
+UseRelation::usage = "UseRelation[name] 把名为 name 的关系代入当前式子。";
+Recall::usage = "Recall[name] 回到名为 name 的关系，从它继续推导。";
+Approximate::usage = "Approximate[rule, reason, assumption] 做一次近似替换(如小角近似)，并把适用条件记入假设清单。";
+ExpandSmall::usage = "ExpandSmall[dx, n] 把方程两边对小量 dx 泰勒展开并保留到 n 阶。";
+TakeLimit::usage = "TakeLimit[dx -> 0] 方程两边取极限。";
 DimM::usage = "质量量纲"; DimL::usage = "长度量纲"; DimT::usage = "时间量纲";
 
 Begin["`Private`"];
@@ -27,16 +35,23 @@ Begin["`Private`"];
 Derivation::noeq = "当前式子不是方程，这一步无法施加: `1`";
 Derivation::nototal = "没能自动把左边认成全导数，请用 RecognizeTotalDerivative[t, F] 给出你的猜测。";
 Derivation::nosol = "没能解出 `1`。";
+Derivation::norel = "找不到名为 `1` 的关系。";
+Derivation::nolim = "极限没能算出来，可先用 ExpandSmall 展开。";
 
 (* ---------- 基础 ---------- *)
 
+DerivationStart[] := Derivation[{}];
 DerivationStart[expr_, reason_ : "出发点"] :=
   Derivation[{<|"Expr" -> expr, "Reason" -> reason, "Check" -> None|>}];
 
-CurrentExpr[Derivation[steps_List]] := Last[steps]["Expr"];
+(* 当前式子 = 最后一行带式子的记录(纯文字的假设行不算) *)
+CurrentExpr[Derivation[steps_List]] :=
+  With[{c = Select[steps, ! MissingQ[#["Expr"]] &]},
+    If[c === {}, Missing["NoExpr"], Last[c]["Expr"]]];
 
-append[Derivation[steps_List], expr_, reason_, check_] :=
-  Derivation[Append[steps, <|"Expr" -> expr, "Reason" -> reason, "Check" -> check|>]];
+append[Derivation[steps_List], expr_, reason_, check_, extra_ : <||>] :=
+  Derivation[Append[steps,
+    Join[<|"Expr" -> expr, "Reason" -> reason, "Check" -> check|>, extra]]];
 
 zeroQ[e_] := TrueQ[Simplify[e] === 0] || TrueQ[Quiet[PossibleZeroQ[e]]];
 
@@ -54,18 +69,36 @@ auto[reason_, default_] := If[reason === Automatic, default, reason];
 
 mark[True] := Style["\[Checkmark]", Darker[Green], Bold];
 mark[False] := Style["\[Times]", Red, Bold];
+mark["Approx"] := Style["\[TildeTilde]", Orange, Bold];
 mark[_] := Style["\[LongDash]", Gray];
 
+(* 多元函数的偏导数按纸面习惯显示成 \[PartialD] 记号 *)
+pretty[e_] := e /. Derivative[n__][f_][a__Symbol] /;
+    Length[{n}] == Length[{a}] && Length[{a}] > 1 :>
+  Inactive[D][f[a], Sequence @@ Replace[
+    Select[Transpose[{{a}, {n}}], Last[#] > 0 &], {v_, 1} :> v, {1}]];
+
+showExpr[e_] := If[MissingQ[e], "", TraditionalForm[pretty[e]]];
+
+showIndex[i_, st_] := If[KeyExistsQ[st, "Label"],
+  Column[{i, Style[Row[{"[", st["Label"], "]"}], Gray, Small]}, Alignment -> Center], i];
+
 ShowDerivation[Derivation[steps_List]] :=
-  Grid[
-    Prepend[
-      MapIndexed[
-        {First[#2], TraditionalForm[#1["Expr"]], #1["Reason"], mark[#1["Check"]]} &,
-        steps],
-      Style[#, Bold] & /@ {"步骤", "式子", "理由", "验证"}],
-    Alignment -> {{Center, Left, Left, Center}},
-    Dividers -> {False, {2 -> Gray}},
-    Spacings -> {2, 1.2}];
+  With[{
+    grid = Grid[
+      Prepend[
+        MapIndexed[
+          {showIndex[First[#2], #1], showExpr[#1["Expr"]], #1["Reason"], mark[#1["Check"]]} &,
+          steps],
+        Style[#, Bold] & /@ {"步骤", "式子", "理由", "验证"}],
+      Alignment -> {{Center, Left, Left, Center}},
+      Dividers -> {False, {2 -> Gray}},
+      Spacings -> {2, 1.2}],
+    as = DeleteDuplicates[DeleteMissing[Lookup[steps, "Assume"]]]},
+    If[as === {}, grid,
+      Column[{grid,
+        Column[Prepend[Row[{"\[Bullet] ", #}] & /@ as,
+          Style["本推导的假设与近似", Bold]]]}, Spacings -> 1.5]]];
 
 Format[d : Derivation[_List]] := ShowDerivation[d];
 
@@ -152,6 +185,58 @@ SolveFor[var_, assum_ : True, reason_ : Automatic][d_Derivation] :=
           auto[reason, Row[{"解出 ", var}]],
           AllTrue[kept, zeroQ[(l - r) /. var -> #] &]]]]]];
 
+(* ---------- 建模步骤 ---------- *)
+
+AssumeThat[text_][d_Derivation] :=
+  append[d, Missing["Note"], Row[{"假设: ", text}], None, <|"Assume" -> text|>];
+
+State[eq_, reason_ : "列出关系", name_ : None][d_Derivation] :=
+  append[d, eq, reason, None, If[name === None, <||>, <|"Label" -> name|>]];
+
+NameIt[name_][Derivation[steps_List]] :=
+  Derivation[Append[Most[steps], Append[Last[steps], "Label" -> name]]];
+
+findRelation[Derivation[steps_List], name_] :=
+  SelectFirst[Reverse[steps], Lookup[#, "Label", None] === name &, Missing["NotFound"]];
+
+(* q[x,t] == 式子 这类关系当作函数定义来代入，这样 q[x+dx,t] 也能被替换 *)
+relationRule[l_ == r_] :=
+  If[MatchQ[l, _Symbol[__Symbol]] && With[{h = Head[l]}, Context[h]] =!= "System`",
+    With[{vs = List @@ l, body = r}, Head[l] -> (Function @@ {vs, body})],
+    l -> r];
+
+UseRelation[name_, reason_ : Automatic][d_Derivation] :=
+  With[{st = findRelation[d, name], old = CurrentExpr[d]},
+    If[MissingQ[st] || ! eqQ[st["Expr"]],
+      Message[Derivation::norel, name]; d,
+      With[{new = old /. relationRule[st["Expr"]]},
+        append[d, new, auto[reason, Row[{"代入 [", name, "]"}]],
+          If[new === old, None, True]]]]];
+
+Recall[name_][d_Derivation] :=
+  With[{st = findRelation[d, name]},
+    If[MissingQ[st], Message[Derivation::norel, name]; d,
+      append[d, st["Expr"], Row[{"回到 [", name, "]"}], None]]];
+
+Approximate[rule_, reason_ : "近似", assumption_ : None][d_Derivation] :=
+  append[d, CurrentExpr[d] /. rule, reason, "Approx",
+    If[assumption === None, <||>, <|"Assume" -> assumption|>]];
+
+ExpandSmall[dx_, n_Integer : 1, reason_ : Automatic][d_Derivation] :=
+  withEq[d, Function[{l, r},
+    With[{nl = Normal[Series[l, {dx, 0, n}]], nr = Normal[Series[r, {dx, 0, n}]]},
+      append[d, nl == nr,
+        auto[reason, Row[{"对小量 ", dx, " 泰勒展开，保留到 ", n, " 阶"}]],
+        "Approx"]]]];
+
+TakeLimit[rule_Rule, reason_ : Automatic][d_Derivation] :=
+  withEq[d, Function[{l, r},
+    With[{nl = Limit[l, rule], nr = Limit[r, rule]},
+      If[! FreeQ[{nl, nr}, Limit],
+        Message[Derivation::nolim]; d,
+        append[d, nl == nr,
+          auto[reason, Row[{"取极限 ", TraditionalForm[rule]}]], True]]]]];
+
 (* ---------- 量纲检查 ---------- *)
 
 Format[DimM] := "M"; Format[DimL] := "L"; Format[DimT] := "T";
@@ -161,8 +246,8 @@ dimOf[expr_, dims_Association] :=
   Module[{look, e, num},
     look[s_] := Lookup[dims, s, 1];
     e = expr /. Inactive[D][f_, v_] :> f/v;
-    e = e /. Derivative[n_][f_][v_] :> look[f]/look[v]^n;
-    e = e /. f_Symbol[_] /; KeyExistsQ[dims, f] :> dims[f];
+    e = e /. Derivative[n__][f_][v__Symbol] :> look[f]/Times @@ ((look /@ {v})^{n});
+    e = e /. f_Symbol[__] /; KeyExistsQ[dims, f] :> dims[f];
     e = PowerExpand[e /. Normal[dims]];
     num = e /. {DimM -> 1, DimL -> 1, DimT -> 1};
     If[zeroQ[num], e, PowerExpand[e/num]]];
