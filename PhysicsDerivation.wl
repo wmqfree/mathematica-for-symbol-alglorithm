@@ -1,0 +1,182 @@
+(* ::Package:: *)
+
+(* PhysicsDerivation: 逐步推导引擎
+   每一步都是一个"有名字、有理由、可验证"的变换。
+   人决定下一步做什么，机器保证这一步算得对。
+   文件编码: UTF-8 *)
+
+BeginPackage["PhysicsDerivation`"];
+
+Derivation::usage = "Derivation[steps] 是一份推导本，steps 中每一项记录 表达式/理由/验证结果。";
+DerivationStart::usage = "DerivationStart[expr, reason] 以 expr 为出发点开始一份推导。";
+ShowDerivation::usage = "ShowDerivation[d] 把推导本排成 步骤 | 式子 | 理由 | 验证 的表格。";
+CurrentExpr::usage = "CurrentExpr[d] 取出推导本当前(最后一步)的式子。";
+DStep::usage = "DStep[f, reason] 通用步骤：对当前式子施加 f，并自动检查前后是否等价。";
+MoveAllToLeft::usage = "MoveAllToLeft[] 移项：把方程写成 左边 == 0。";
+MultiplyBoth::usage = "MultiplyBoth[f, reason] 方程两边同乘 f。";
+DivideBoth::usage = "DivideBoth[f, reason] 方程两边同除以 f。";
+RecognizeTotalDerivative::usage = "RecognizeTotalDerivative[t] 尝试把 左边==0 的左边认成对 t 的全导数；RecognizeTotalDerivative[t, F] 由你猜 F，机器求导验证。";
+IntegrateBoth::usage = "IntegrateBoth[t, c] 两边对 t 积分，c 为积分常量。";
+SubstituteInto::usage = "SubstituteInto[rule, reason] 把 rule 代入当前式子(如试探解)。";
+SolveFor::usage = "SolveFor[var, assum, reason] 从当前方程解出 var，assum 用来舍去不合物理的根。";
+CheckDimensions::usage = "CheckDimensions[<|m -> DimM, x -> DimL, t -> DimT, ...|>] 检查当前方程各项量纲是否一致。";
+DimM::usage = "质量量纲"; DimL::usage = "长度量纲"; DimT::usage = "时间量纲";
+
+Begin["`Private`"];
+
+Derivation::noeq = "当前式子不是方程，这一步无法施加: `1`";
+Derivation::nototal = "没能自动把左边认成全导数，请用 RecognizeTotalDerivative[t, F] 给出你的猜测。";
+Derivation::nosol = "没能解出 `1`。";
+
+(* ---------- 基础 ---------- *)
+
+DerivationStart[expr_, reason_ : "出发点"] :=
+  Derivation[{<|"Expr" -> expr, "Reason" -> reason, "Check" -> None|>}];
+
+CurrentExpr[Derivation[steps_List]] := Last[steps]["Expr"];
+
+append[Derivation[steps_List], expr_, reason_, check_] :=
+  Derivation[Append[steps, <|"Expr" -> expr, "Reason" -> reason, "Check" -> check|>]];
+
+zeroQ[e_] := TrueQ[Simplify[e] === 0] || TrueQ[Quiet[PossibleZeroQ[e]]];
+
+eqQ[e_] := MatchQ[e, _Equal] && Length[e] == 2;
+
+(* 当前式子是方程时，把左右两边交给 body；否则报错并原样返回 *)
+withEq[d_Derivation, body_] :=
+  With[{cur = CurrentExpr[d]},
+    If[eqQ[cur], body[First[cur], Last[cur]],
+      Message[Derivation::noeq, cur]; d]];
+
+auto[reason_, default_] := If[reason === Automatic, default, reason];
+
+(* ---------- 显示 ---------- *)
+
+mark[True] := Style["\[Checkmark]", Darker[Green], Bold];
+mark[False] := Style["\[Times]", Red, Bold];
+mark[_] := Style["\[LongDash]", Gray];
+
+ShowDerivation[Derivation[steps_List]] :=
+  Grid[
+    Prepend[
+      MapIndexed[
+        {First[#2], TraditionalForm[#1["Expr"]], #1["Reason"], mark[#1["Check"]]} &,
+        steps],
+      Style[#, Bold] & /@ {"步骤", "式子", "理由", "验证"}],
+    Alignment -> {{Center, Left, Left, Center}},
+    Dividers -> {False, {2 -> Gray}},
+    Spacings -> {2, 1.2}];
+
+Format[d : Derivation[_List]] := ShowDerivation[d];
+
+(* ---------- 通用步骤 ---------- *)
+
+(* 方程: 新旧"左边-右边"只差一个非零常数因子 => 等价; 表达式: 差为零 => 相等 *)
+equivalent[old_, new_] :=
+  Which[
+    eqQ[old] && eqQ[new],
+      With[{a = First[old] - Last[old], b = First[new] - Last[new]},
+        Which[
+          zeroQ[a - b], True,
+          NumericQ[Simplify[b/a]] && ! zeroQ[b], True,
+          True, None]],
+    eqQ[old] || eqQ[new], None,
+    True, zeroQ[old - new]];
+
+DStep[f_, reason_ : "变形"][d_Derivation] :=
+  With[{old = CurrentExpr[d]},
+    With[{new = f[old]}, append[d, new, reason, equivalent[old, new]]]];
+
+(* ---------- 具名步骤 ---------- *)
+
+MoveAllToLeft[reason_ : "移项，把所有项放到左边"][d_Derivation] :=
+  withEq[d, Function[{l, r}, append[d, l - r == 0, reason, True]]];
+
+MultiplyBoth[f_, reason_ : Automatic][d_Derivation] :=
+  withEq[d, Function[{l, r},
+    With[{nl = Expand[l f], nr = Expand[r f]},
+      append[d, nl == nr,
+        auto[reason, Row[{"两边同乘 ", TraditionalForm[f]}]],
+        zeroQ[(nl - nr) - f (l - r)]]]]];
+
+DivideBoth[f_, reason_ : Automatic][d_Derivation] :=
+  withEq[d, Function[{l, r},
+    With[{nl = Simplify[l/f], nr = Simplify[r/f]},
+      append[d, nl == nr,
+        auto[reason, Row[{"两边同除以 ", TraditionalForm[f]}]],
+        zeroQ[(nl - nr) f - (l - r)]]]]];
+
+(* 由学生给出猜测 F，机器求导验证 *)
+RecognizeTotalDerivative[t_, F_, reason_ : Automatic][d_Derivation] :=
+  withEq[d, Function[{l, r},
+    With[{diff = Simplify[D[F, t] - (l - r)]},
+      If[zeroQ[diff],
+        append[d, Inactive[D][F, t] == 0,
+          auto[reason, "左边恰好是一个全导数(求导验证通过)"], True],
+        append[d, l == r,
+          Row[{"猜测不成立: 对它求导后与左边相差 ", TraditionalForm[diff]}], False]]]]];
+
+(* 机器自己找 F *)
+RecognizeTotalDerivative[t_][d_Derivation] :=
+  withEq[d, Function[{l, r},
+    With[{F = Quiet[Integrate[l - r, t]]},
+      If[FreeQ[F, Integrate] && zeroQ[D[F, t] - (l - r)],
+        append[d, Inactive[D][F, t] == 0, "左边恰好是一个全导数", True],
+        Message[Derivation::nototal]; d]]]];
+
+IntegrateBoth[t_, c_, reason_ : Automatic][d_Derivation] :=
+  withEq[d, Function[{l, r},
+    If[MatchQ[l, Inactive[D][_, t]] && r === 0,
+      append[d, First[l] == c,
+        auto[reason, Row[{"对 ", t, " 积分: 全导数为零，括号内是常量 ", c}]], True],
+      With[{nl = Quiet[Integrate[l, t]], nr = Quiet[Integrate[r, t]] + c},
+        append[d, nl == nr,
+          auto[reason, Row[{"两边对 ", t, " 积分"}]],
+          FreeQ[{nl, nr}, Integrate] && zeroQ[D[nl - nr, t] - (l - r)]]]]]];
+
+SubstituteInto[rule_, reason_ : Automatic][d_Derivation] :=
+  append[d, CurrentExpr[d] /. rule,
+    auto[reason, Row[{"代入 ", TraditionalForm[rule]}]], None];
+
+SolveFor[var_, assum_ : True, reason_ : Automatic][d_Derivation] :=
+  withEq[d, Function[{l, r},
+    Module[{rules, sols, kept},
+      rules = Quiet[Solve[l == r, var]];
+      If[! MatchQ[rules, {{_Rule} ..}],
+        Message[Derivation::nosol, var]; d,
+        sols = var /. rules;
+        kept = Select[sols, Simplify[assum /. var -> #, assum] =!= False &];
+        If[kept === {}, kept = sols];
+        append[d,
+          If[Length[kept] == 1, var == First[kept], Or @@ (var == # & /@ kept)],
+          auto[reason, Row[{"解出 ", var}]],
+          AllTrue[kept, zeroQ[(l - r) /. var -> #] &]]]]]];
+
+(* ---------- 量纲检查 ---------- *)
+
+Format[DimM] := "M"; Format[DimL] := "L"; Format[DimT] := "T";
+
+(* 未在 dims 中登记的符号按无量纲处理 *)
+dimOf[expr_, dims_Association] :=
+  Module[{look, e, num},
+    look[s_] := Lookup[dims, s, 1];
+    e = expr /. Inactive[D][f_, v_] :> f/v;
+    e = e /. Derivative[n_][f_][v_] :> look[f]/look[v]^n;
+    e = e /. f_Symbol[_] /; KeyExistsQ[dims, f] :> dims[f];
+    e = PowerExpand[e /. Normal[dims]];
+    num = e /. {DimM -> 1, DimL -> 1, DimT -> 1};
+    If[zeroQ[num], e, PowerExpand[e/num]]];
+
+terms[e_] := With[{x = Expand[e]}, DeleteCases[If[Head[x] === Plus, List @@ x, {x}], 0]];
+
+CheckDimensions[dims_Association][d_Derivation] :=
+  withEq[d, Function[{l, r},
+    With[{ds = DeleteDuplicates[dimOf[#, dims] & /@ Join[terms[l], terms[r]]]},
+      append[d, l == r,
+        If[Length[ds] == 1,
+          Row[{"量纲检查: 各项量纲均为 ", First[ds]}],
+          Row[{"量纲不一致: 出现了 ", ds}]],
+        Length[ds] == 1]]]];
+
+End[];
+EndPackage[];
