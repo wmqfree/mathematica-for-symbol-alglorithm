@@ -84,9 +84,10 @@ smallOrder[term_] := With[{t = term //. HoldForm[x_] :> x},
 derivOrder[term_] := Max[0,
   Cases[term, Derivative[n__] :> Total[{n}], {0, Infinity}, Heads -> True]];
 
-(* 和式: 小量的低阶项在前，其次高阶导数在前，单独的常量放最后 *)
+(* 和式: 小量的低阶项在前，其次高阶导数在前，带负号的项和单独的常量靠后 *)
 sortPlus[terms_List] := First /@ SortBy[
-  MapIndexed[{#1, {smallOrder[#1], -derivOrder[#1], Boole[AtomQ[#1]], First[#2]}} &, terms], Last];
+  MapIndexed[{#1, {smallOrder[#1], -derivOrder[#1],
+    Boole[MatchQ[#1, _?Negative | Times[_?Negative, ___]]], Boole[AtomQ[#1]], First[#2]}} &, terms], Last];
 
 (* 乘积: 数字、常量符号、小量、函数与导数 *)
 factorClass[x_] := Which[
