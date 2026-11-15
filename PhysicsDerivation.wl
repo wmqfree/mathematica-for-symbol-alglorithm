@@ -77,9 +77,10 @@ mark[_] := Style["\[LongDash]", Gray];
 userQ[h_] := MatchQ[h, _Symbol] && Context[h] =!= "System`";
 smallQ[s_] := MatchQ[s, _Symbol] && StringStartsQ[SymbolName[s], "\[CapitalDelta]"];
 
-smallOrder[term_] := Total[
-  Quiet[Check[Exponent[term, #], 0]] & /@
-    Union[Cases[term, x_Symbol /; smallQ[x], {0, Infinity}]]];
+(* 子项此时可能已被 HoldForm 包住，先解开再数小量的幂次 *)
+smallOrder[term_] := With[{t = term //. HoldForm[x_] :> x},
+  Total[Quiet[Check[Exponent[t, #], 0]] & /@
+    Union[Cases[t, x_Symbol /; smallQ[x], {0, Infinity}]]]];
 derivOrder[term_] := Max[0,
   Cases[term, Derivative[n__] :> Total[{n}], {0, Infinity}, Heads -> True]];
 
